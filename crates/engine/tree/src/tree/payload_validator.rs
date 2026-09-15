@@ -66,7 +66,7 @@ use reth_consensus::{ConsensusError, FullConsensus, ReceiptRootBloom};
 use reth_engine_primitives::{
     ConfigureEngineEvm, ExecutableTxIterator, ExecutionPayload, InvalidBlockHook, PayloadValidator,
 };
-use reth_errors::{BlockExecutionError, ProviderResult};
+use reth_errors::{BlockExecutionError, BlockValidationError, ProviderResult};
 use reth_evm::{
     block::BlockExecutor, execute::ExecutableTxFor, ConfigureEvm, EvmEnvFor, ExecutionCtxFor,
     OnStateHook, SpecFor,
@@ -1050,7 +1050,7 @@ where
             let Some(tx_result) = transactions.next() else { break };
             self.metrics.record_transaction_wait(wait_start.elapsed());
 
-            let tx = tx_result.map_err(BlockExecutionError::other)?;
+            let tx = tx_result.map_err(transaction_conversion_validation_error)?;
             let tx_signer = *<Tx as alloy_evm::RecoveredTx<InnerTx>>::signer(&tx);
 
             senders.push(tx_signer);
@@ -1872,6 +1872,36 @@ where
             code_cache_hits,
             code_cache_misses,
         })
+    }
+}
+
+/// Classifies transaction decoding and signer-recovery failures as invalid payload input.
+///
+/// These errors are produced while converting transactions supplied by `engine_newPayload` into
+/// executable transactions. They therefore describe an invalid block, not an internal node
+/// failure, and must be returned to the consensus client as `PayloadStatus::INVALID`.
+fn transaction_conversion_validation_error<E>(error: E) -> BlockExecutionError
+where
+    E: core::error::Error + Send + Sync + 'static,
+{
+    BlockValidationError::other(error).into()
+}
+
+#[cfg(test)]
+mod transaction_conversion_tests {
+    use std::io;
+
+    use reth_errors::{BlockExecutionError, BlockValidationError};
+
+    use super::transaction_conversion_validation_error;
+
+    #[test]
+    fn conversion_failure_is_a_block_validation_error() {
+        let error = transaction_conversion_validation_error(io::Error::other(
+            "failed to recover transaction signer",
+        ));
+
+        assert!(matches!(error, BlockExecutionError::Validation(BlockValidationError::Other(_))));
     }
 }
 
